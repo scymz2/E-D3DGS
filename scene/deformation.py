@@ -19,29 +19,34 @@ class deform_network(nn.Module):
         self.W = W
 
         self.args = args
-        self.min_embeddings = min_embeddings
-        self.max_embeddings = max_embeddings
+        self.min_embeddings = min_embeddings # 最小的时间嵌入数量
+        self.max_embeddings = max_embeddings # 最大的时间嵌入数量
         self.num_frames = num_frames
         self.temporal_embedding_dim = args.temporal_embedding_dim
         self.gaussian_embedding_dim = args.gaussian_embedding_dim
-        self.c2f_temporal_iter = args.c2f_temporal_iter
+        self.c2f_temporal_iter = args.c2f_temporal_iter # 渐进式训练参数
 
+        # 粗粒度网络（coarse）
         self.feature_out_c, self.pos_deform_c, self.scales_deform_c, self.rotations_deform_c, self.opacity_deform_c, self.rgb_deform_c = self.create_net()
+        # 细粒度网络（fine）
         self.feature_out_f, self.pos_deform_f, self.scales_deform_f, self.rotations_deform_f, self.opacity_deform_f, self.rgb_deform_f = self.create_net()
 
-        if args.zero_temporal:
+        if args.zero_temporal: # 时间嵌入
+            # 零初始化的时间嵌入
             self.weight = torch.nn.Parameter(torch.zeros(max_embeddings, self.temporal_embedding_dim))
         else:
+            # 正态分布初始化的时间嵌入，避免梯度爆炸或者消失
             self.weight = torch.nn.Parameter(torch.normal(0., 0.01/np.sqrt(self.temporal_embedding_dim),size=(max_embeddings, self.temporal_embedding_dim)))
         self.offsets = torch.nn.Parameter(torch.zeros((30, 1)))  # hard coded the upper limit of the num cameras (adjust as necessary)
 
     def create_net(self):
+        # 初始化一个包含单个线性层的列表，这个线性层的作用是将时间嵌入和高斯嵌入的维度组合并映射到W维度
         self.feature_out = [nn.Linear(self.temporal_embedding_dim + self.gaussian_embedding_dim, self.W)]
         
         for i in range(self.D-1):
             self.feature_out.append(nn.ReLU())
             self.feature_out.append(nn.Linear(self.W,self.W))
-        feature_out = nn.Sequential(*self.feature_out)
+        feature_out = nn.Sequential(*self.feature_out) # 列表转为顺序容器, Sequential可以将多个层组合成一个层，层中自动执行forward
         return  \
             feature_out,\
             nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3)),\
@@ -51,6 +56,7 @@ class deform_network(nn.Module):
             nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3*16)),\
 
     def get_temporal_embed(self, t, current_num_embeddings, align_corners=True):
+        # 动态调整时间嵌入表大小，根据current_num_embeddings参数
         emb_resized = F.interpolate(self.weight[None,None,...], 
                                  size=(current_num_embeddings, self.temporal_embedding_dim), 
                                  mode='bilinear', align_corners=True)
@@ -58,6 +64,7 @@ class deform_network(nn.Module):
         t = t[0,0]
 
         fdim = self.temporal_embedding_dim
+        # 基于时间戳进行双线性采样
         grid = torch.cat([torch.arange(fdim).cuda().unsqueeze(-1)/(fdim-1), torch.ones(fdim,1).cuda() * t, ], dim=-1)[None,None,...]
         grid = (grid - 0.5) * 2
 

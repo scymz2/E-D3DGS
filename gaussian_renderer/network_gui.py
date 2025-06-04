@@ -35,7 +35,7 @@ def try_connect():
     global conn, addr, listener
     try:
         conn, addr = listener.accept()
-        print(f"\nConnected by {addr}")
+        # print(f"\nConnected by {addr}")
         conn.settimeout(None)
     except Exception as inst:
         pass
