@@ -26,6 +26,8 @@ class deform_network(nn.Module):
         self.gaussian_embedding_dim = args.gaussian_embedding_dim
         self.c2f_temporal_iter = args.c2f_temporal_iter # 渐进式训练参数
 
+
+        # 以下网络包含位置变形（三维）， 尺度变形（三维）， 旋转变形（四维四元数）， 不透明度变形（一维）， RGB变形（四十八维， 3*16球谐函数）
         # 粗粒度网络（coarse）
         self.feature_out_c, self.pos_deform_c, self.scales_deform_c, self.rotations_deform_c, self.opacity_deform_c, self.rgb_deform_c = self.create_net()
         # 细粒度网络（fine）
@@ -56,19 +58,29 @@ class deform_network(nn.Module):
             nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3*16)),\
 
     def get_temporal_embed(self, t, current_num_embeddings, align_corners=True):
-        # 动态调整时间嵌入表大小，根据current_num_embeddings参数
+        # 动态调整时间嵌入表大小
+        # self.weight shape: [max_embeddings, temporal_embedding_dim]
+        # 通过双线性插值将其调整为 [current_num_embeddings, temporal_embedding_dim]
         emb_resized = F.interpolate(self.weight[None,None,...], 
                                  size=(current_num_embeddings, self.temporal_embedding_dim), 
                                  mode='bilinear', align_corners=True)
+        
+        # 第2步：获取批次大小和时间戳
         N, _ = t.shape
         t = t[0,0]
 
+        # 第三步：构建采样网格
         fdim = self.temporal_embedding_dim
-        # 基于时间戳进行双线性采样
+        # 创建一个2D网格用于grid_sample，双线性归一化采样
+        # x坐标：特征维度的归一化坐标 [0, 1]
+        # y坐标：时间坐标，所有位置都是相同的时间t
         grid = torch.cat([torch.arange(fdim).cuda().unsqueeze(-1)/(fdim-1), torch.ones(fdim,1).cuda() * t, ], dim=-1)[None,None,...]
+        # 第4步：将坐标从[0,1]转换到[-1,1]（grid_sample要求）
         grid = (grid - 0.5) * 2
 
+        # 第5步：使用grid_sample进行双线性采样
         emb = F.grid_sample(emb_resized, grid, align_corners=align_corners, mode='bilinear', padding_mode='reflection')
+        # 第6步：扩展到批次维度
         emb = emb.repeat(1,1,N,1).squeeze()
 
         return emb
@@ -77,20 +89,29 @@ class deform_network(nn.Module):
         return int(init_val + (final_val - init_val) * min(max(t, 0), until) / until)
     
     def query_time(self, pts, scales, rotations, time_emb, pc=None, embeddings=None, sh_coef=None, iter=None, feature_out=None, use_coarse_temporal_embedding=False, num_down_emb=30):
+        # 第1步：提取时间信息
         t = time_emb[:,:1]
+
+        # 第2步：根据不同策略获取时间嵌入
         if use_coarse_temporal_embedding:
+            # 粗粒度：使用固定的较少嵌入数量
             h = self.get_temporal_embed(t, num_down_emb)
         else:
             if self.args.no_c2f_temporal_embedding:
+                # 不使用渐进式：直接使用最大嵌入数量
                 h = self.get_temporal_embed(t, self.max_embeddings)
             else:
+                # 渐进式：根据当前迭代次数动态调整嵌入数量
+                # 从num_down_emb逐渐增加到max_embeddings
                 h = self.get_temporal_embed(t, self.int_lininterp(iter, num_down_emb, self.max_embeddings, self.c2f_temporal_iter))
-    
+        
+        # 第3步：拼接时间嵌入和高斯嵌入
         if type(pc) == type(None):
-            h = torch.cat([h, embeddings], dim=-1)
+            h = torch.cat([h, embeddings], dim=-1) # 直接使用传入的embeddings
         else:        
-            h = torch.cat([h, pc.get_embedding], dim=-1)
+            h = torch.cat([h, pc.get_embedding], dim=-1) # 从点云对象获取embedding
 
+        # 第4步：通过特征网络处理
         h = feature_out(h)
         return h
 
@@ -100,7 +121,7 @@ class deform_network(nn.Module):
         
         if not self.args.no_ds:
             ds = scales_deform(hidden)
-            scales = scales + ds * scale * coef_s
+            scales = scales + ds * scale * coef_s  # scale 是主退火系数
         if not self.args.no_dr:
             dr = rotations_deform(hidden)
             rotations = rotations + dr * scale
@@ -123,8 +144,9 @@ class deform_network(nn.Module):
             offset = self.offsets[cam_no]
         time_emb += offset
 
+        # 退火稀疏计算
         use_anneal = self.args.use_anneal
-        coef = 1 if not use_anneal else np.clip(iter/1000,0,1) 
+        coef = 1 if not use_anneal else np.clip(iter/1000,0,1)  # 主变形系数
         coef_c = 1 if not use_anneal else np.clip((iter-self.args.deform_from_iter)/1000,0,1)
         coef_o = 1 if not use_anneal else np.clip((iter-self.args.deform_from_iter)/1000,0,1)
         coef_s = 1 if not use_anneal else np.clip((iter-self.args.deform_from_iter)/1000,0,1)
