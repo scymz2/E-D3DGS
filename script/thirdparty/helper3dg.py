@@ -311,4 +311,30 @@ def getcolmapsinglehyper(folder):
         exit(exit_code)
     print(stereo_fusion_cmd)
 
+    # Ensure sparse/0 directory exists with required binary files
+    sparse_dir = os.path.join(folder, "sparse/0")
+    if not os.path.exists(sparse_dir):
+        os.makedirs(sparse_dir, exist_ok=True)
+    
+    # Check if binary files already exist
+    required_files = ["cameras.bin", "images.bin", "points3D.bin"]
+    files_exist = all(os.path.exists(os.path.join(sparse_dir, f)) for f in required_files)
+    
+    if not files_exist:
+        # Copy binary files from workspace_path/sparse/0
+        source_dir = os.path.join(workspace_path, "sparse")
+        if os.path.exists(source_dir):
+            print(f"Copying binary files from {source_dir} to {sparse_dir}")
+            for file_name in required_files:
+                source_file = os.path.join(source_dir, file_name)
+                if os.path.exists(source_file):
+                    shutil.copy(source_file, os.path.join(sparse_dir, file_name))
+                    print(f"Copied {file_name}")
+                else:
+                    print(f"Warning: Source file {source_file} does not exist")
+        else:
+            print(f"Warning: Source directory {source_dir} does not exist")
+    else:
+        print("Binary model files already exist in sparse/0 directory")
+
     return

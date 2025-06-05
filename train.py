@@ -96,9 +96,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     viewpoint_stack = train_cams
     method = None
 
-    # 修复
+    # 相机读取顺序计算器
     count = 0
-    video_cams = scene.getVideoCameras()
+    video_cams = scene.getTrainCameras()
 
     start_time = time()
     for iteration in range(first_iter, final_iter+1):  
@@ -122,8 +122,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                     # 这里传递时间戳
                     viewpoint = video_cams[viewpoint_index]
                     custom_cam.time = viewpoint.time
-                    print("custom_cam.time:", custom_cam.time, "viewpoint_index:", viewpoint_index, "count:", count)
-                    # print(custom_cam.time, viewpoint_index, count)
+                    #print("custom_cam.time:", custom_cam.time, "viewpoint_index:", viewpoint_index, "count:", count)
                     # 修复：使用 custom_cam 而不是 viewpoint 进行渲染
                     net_image = render(custom_cam, gaussians, pipe, background, cam_no=viewpoint.cam_no, iter=iteration, \
                 num_down_emb_c=hyper.min_embeddings, num_down_emb_f=hyper.min_embeddings, gui=True)["render"]

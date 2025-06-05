@@ -89,18 +89,22 @@ class GaussianModel:
     def restore(self, model_args, training_args):
         (self.active_sh_degree, 
         self._xyz, 
-        self._deformation,
+        deformation_state_dict,  # This is a state dict, not the network object
         self._features_dc, 
         self._features_rest,
-        self._embedding,
-        self._scaling, 
+        self._scaling,  # Fixed: moved scaling before embedding
         self._rotation, 
         self._opacity,
+        self._embedding,  # Fixed: moved embedding after opacity
         self.max_radii2D, 
         xyz_gradient_accum, 
         denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
+        
+        # Load the state dict into the existing deformation network
+        self._deformation.load_state_dict(deformation_state_dict)
+        
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom

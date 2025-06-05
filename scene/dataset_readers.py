@@ -15,7 +15,7 @@ from PIL import Image
 from typing import NamedTuple
 from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
     read_extrinsics_binary, read_intrinsics_binary
-from scene.hyper_loader import Load_hyper_data, format_hyper_data
+from scene.hyper_loader import Load_hyper_data
 import copy
 from utils.graphics_utils import getWorld2View2, focal2fov
 import numpy as np
@@ -368,17 +368,42 @@ def readColmapSceneInfoTechnicolor(path, images, eval, duration=None, testonly=N
 
 
 def readHyperDataInfos(datadir,use_bg_points, eval, startime=0, duration=None):
-    train_cam_infos = Load_hyper_data(datadir, 0.5, use_bg_points, split ="train", startime=startime, duration=duration)
-    test_cam_infos = Load_hyper_data(datadir, 0.5, use_bg_points, split="test", startime=startime, duration=duration)
-    print("load finished")
-    train_cam = format_hyper_data(train_cam_infos,"train", 
-                                  near=train_cam_infos.near, far=train_cam_infos.far,
-                                  startime=train_cam_infos.startime, duration=train_cam_infos.duration)
-    print("format finished")
-    video_cam_infos = copy.deepcopy(test_cam_infos)
-    video_cam_infos.split="video"
+    # 直接使用Load_hyper_data类来加载数据，避免重复处理
+    train_loader = Load_hyper_data(datadir, 0.5, use_bg_points, split="train", startime=startime, duration=duration)
+    test_loader = Load_hyper_data(datadir, 0.5, use_bg_points, split="test", startime=startime, duration=duration)
+    
+    # train_cam_infos = Load_hyper_data(datadir, 0.5, use_bg_points, split ="train", startime=startime, duration=duration)
+    # test_cam_infos = Load_hyper_data(datadir, 0.5, use_bg_points, split="test", startime=startime, duration=duration)
+    # print("load finished")
+    # train_cam = format_hyper_data(train_cam_infos,"train", 
+    #                               near=train_cam_infos.near, far=train_cam_infos.far,
+    #                               startime=train_cam_infos.startime, duration=train_cam_infos.duration)
+    # print("format finished")
 
-    nerf_normalization = getNerfppNorm(train_cam)
+    print("Data loaders created")
+    
+    # 直接从loader获取相机信息，不需要format_hyper_data
+    train_cam_infos = []
+    for i in range(len(train_loader)):
+        cam_info = train_loader[i]
+        train_cam_infos.append(cam_info)
+    
+    test_cam_infos = []
+    for i in range(len(test_loader)):
+        cam_info = test_loader[i]
+        test_cam_infos.append(cam_info)
+        
+    print("Camera info loading finished")
+
+    # 创建视频相机信息
+    video_loader = Load_hyper_data(datadir, 0.5, use_bg_points, split="video", startime=startime, duration=duration)
+    video_cam_infos = []
+    for i in range(len(video_loader)):
+        cam_info = video_loader[i]
+        video_cam_infos.append(cam_info)
+
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
 
     ply_path = os.path.join(datadir, "points3D_downsample.ply")
     pcd = fetchPly(ply_path)
