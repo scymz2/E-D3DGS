@@ -5,7 +5,7 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from time import time as get_time
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, cam_no=None, iter=None, train_coarse=False, \
-    num_down_emb_c=5, num_down_emb_f=5):
+    num_down_emb_c=5, num_down_emb_f=5, gui=False):
     """
     Render the scene. 
     
@@ -111,11 +111,17 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.
 
-
-    return {"render": rendered_image,
+    if gui:
+        return {"render": rendered_image,
             "viewspace_points": screenspace_points,
             "visibility_filter" : radii > 0,
             "radii": radii,
-            "depth":depth,
-            "sh_coefs_final": shs_final,
-            "extras":extras,}
+            "depth":depth}
+    else:
+        return {"render": rendered_image,
+                "viewspace_points": screenspace_points,
+                "visibility_filter" : radii > 0,
+                "radii": radii,
+                "depth":depth,
+                "sh_coefs_final": shs_final,
+                "extras":extras,}

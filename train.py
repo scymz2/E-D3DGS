@@ -26,6 +26,7 @@ from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams, ModelHiddenParams
 from utils.timer import Timer
 from utils.extra_utils import o3d_knn, weighted_l2_loss_v2, image_sampler, calculate_distances, sample_camera
+import re
 
 # import lpips
 from utils.scene_utils import render_training_image
@@ -95,8 +96,47 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
     viewpoint_stack = train_cams
     method = None
 
+    # 修复
+    count = 0
+    video_cams = scene.getVideoCameras()
+
     start_time = time()
-    for iteration in range(first_iter, final_iter+1):             
+    for iteration in range(first_iter, final_iter+1):  
+        # -------------------------------------network gui------------------------------------
+
+        if network_gui.conn == None:
+            network_gui.try_connect()
+        while network_gui.conn != None:
+            try:
+                net_image_bytes = None
+                custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive() 
+                # print("recived: custom_cam:", custom_cam, "do_training:", do_training, "keep_alive:", keep_alive, "scaling_modifer:", scaling_modifer)
+                if custom_cam != None:
+                    count+=1
+                    viewpoint_index = (count ) % len(video_cams)
+                    if (count //(len(video_cams))) % 2 == 0:
+                        viewpoint_index = viewpoint_index
+                    else:
+                        viewpoint_index = len(video_cams) - viewpoint_index - 1
+                    # print(viewpoint_index)
+                    # 这里传递时间戳
+                    viewpoint = video_cams[viewpoint_index]
+                    custom_cam.time = viewpoint.time
+                    print("custom_cam.time:", custom_cam.time, "viewpoint_index:", viewpoint_index, "count:", count)
+                    # print(custom_cam.time, viewpoint_index, count)
+                    # 修复：使用 custom_cam 而不是 viewpoint 进行渲染
+                    net_image = render(custom_cam, gaussians, pipe, background, cam_no=viewpoint.cam_no, iter=iteration, \
+                num_down_emb_c=hyper.min_embeddings, num_down_emb_f=hyper.min_embeddings, gui=True)["render"]
+                    # 将渲染的图像转换为字节流
+                    net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
+                network_gui.send(net_image_bytes, dataset.source_path)
+                if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
+                    break
+            except Exception as e:
+                print(e)
+                network_gui.conn = None
+
+
         iter_start.record()
 
         gaussians.update_learning_rate(iteration)
@@ -137,7 +177,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         visibility_filter_list = []
         viewspace_point_tensor_list = []
         cam_no_list, frame_no_list = [], []
+        # print(len(viewpoint_cams), "viewpoint_cams")
         for viewpoint_cam in viewpoint_cams:
+            # print("Rendering camera no:", viewpoint_cam.cam_no, "frame no:", viewpoint_cam.frame_no)
             if type(viewpoint_cam.original_image) == type(None):
                 viewpoint_cam.load_image()  # for lazy loading (to avoid OOM issue)
             cam_no = viewpoint_cam.cam_no
@@ -155,6 +197,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             visibility_filter_list.append(visibility_filter.unsqueeze(0))
             viewspace_point_tensor_list.append(viewspace_point_tensor)
         
+        # print("Rendering done, calculating loss...")
         radii = torch.cat(radii_list,0).max(dim=0).values
         visibility_filter = torch.cat(visibility_filter_list).any(dim=0)
         image_tensor = torch.cat(images,0)
@@ -279,6 +322,32 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     gaussians = GaussianModel(dataset.sh_degree, hyper)
     dataset.model_path = args.model_path
     timer = Timer()
+
+    # Adjust iterations if watch mode is enabled and checkpoint is provided
+    current_checkpoint_iter = 0
+    checkpoint = os.path.join(args.model_path, checkpoint) if checkpoint else None
+    if args.watch and checkpoint:
+        try:
+            # Try loading the checkpoint to get the exact iteration number
+            _, current_checkpoint_iter = torch.load(checkpoint)
+            print(f"Watch mode: Loaded iteration {current_checkpoint_iter} from checkpoint {checkpoint}")
+        except Exception as e:
+            print(f"Watch mode: Could not load checkpoint {checkpoint} to get exact iteration: {e}. Trying to extract from filename.")
+            # Fallback: Extract iteration number from filename if loading fails
+            match = re.search(r'_(\d+)\.pth$', checkpoint)
+            if match:
+                current_checkpoint_iter = int(match.group(1))
+                print(f"Watch mode: Extracted iteration {current_checkpoint_iter} from checkpoint filename.")
+            else:
+                print(f"Watch mode: Could not extract iteration from checkpoint filename {checkpoint}. Exiting.")
+                sys.exit(1)
+        
+        # Set iterations based on the checkpoint iteration + 10
+        opt.coarse_iterations = current_checkpoint_iter + 10
+        opt.iterations = current_checkpoint_iter + 10
+        print(f"Watch mode: Setting coarse_iterations and iterations to {current_checkpoint_iter + 10}")
+
+
     scene = Scene(dataset, gaussians, shuffle=dataset.shuffle, loader=dataset.loader, duration=hyper.total_num_frames, opt=opt)
     timer.start()
     
@@ -332,10 +401,11 @@ if __name__ == "__main__":
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[i*500 for i in range(0,120)])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[3000, 5000, 7000, 14000, 20000, 30000, 45000, 60000, 80000, 100000, 120000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[14000, 20000, 30000, 45000, 60000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--expname", type=str, default = "")
     parser.add_argument("--configs", type=str, default = "")
+    parser.add_argument("--watch", action='store_true', help="Enable watch mode: run only 10 iterations beyond the checkpoint.")
     
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
@@ -350,7 +420,7 @@ if __name__ == "__main__":
     safe_state(args.quiet)
 
     # Start GUI server, configure and run training
-    # network_gui.init(args.ip, args.port)
+    network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
 
