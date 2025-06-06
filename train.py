@@ -33,11 +33,19 @@ from utils.scene_utils import render_training_image
 from time import time
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    TENSORBOARD_FOUND = True
+except ImportError:
+    TENSORBOARD_FOUND = False
+
 
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
                          gaussians, scene, tb_writer, train_iter,timer, start_time):
     first_iter = 0
+    
+    stage = "mix"  # 添加stage变量定义
 
     gaussians.training_setup(opt)
     if checkpoint:
@@ -272,7 +280,9 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
 
             # Log and save
             timer.pause()
- 
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), 
+                   testing_iterations, scene, render, [pipe, background], stage, dataset.loader, 
+                   hyper.min_embeddings)  # Pass min_embeddings as parameter
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -365,7 +375,6 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
 def prepare_output_and_logger(expname):    
     if not args.model_path:
         unique_str = expname
-
         args.model_path = os.path.join("./output/", unique_str)
     # Set up output folder
     print("Output folder: {}".format(args.model_path))
@@ -373,7 +382,70 @@ def prepare_output_and_logger(expname):
     with open(os.path.join(args.model_path, "cfg_args"), 'w') as cfg_log_f:
         cfg_log_f.write(str(Namespace(**vars(args))))
 
+    # Create Tensorboard writer
+    tb_writer = None
+    if TENSORBOARD_FOUND:
+        tb_writer = SummaryWriter(args.model_path)
+    else:
+        print("Tensorboard not available: not logging progress")
+    return tb_writer
 
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, 
+                   scene : Scene, renderFunc, renderArgs, stage, dataset_type, min_embeddings=0):
+    if tb_writer:
+        tb_writer.add_scalar(f'{stage}/train_loss_patches/l1_loss', Ll1.item(), iteration)
+        tb_writer.add_scalar(f'{stage}/train_loss_patches/total_loss', loss.item(), iteration)
+        tb_writer.add_scalar(f'{stage}/iter_time', elapsed, iteration)
+        
+    # Report test and samples of training set
+    if iteration in testing_iterations:
+        torch.cuda.empty_cache()
+        
+        validation_configs = ({'name': 'test', 'cameras' : [scene.getTestCameras()[idx % len(scene.getTestCameras())] for idx in range(10, 5000, 299)]},
+                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(10, 5000, 299)]})
+
+        for config in validation_configs:
+            if config['cameras'] and len(config['cameras']) > 0:
+                l1_test = 0.0
+                psnr_test = 0.0
+                for idx, viewpoint in enumerate(config['cameras']):
+                    # Use the passed min_embeddings instead of trying to access embeddings directly
+                    render_pkg = renderFunc(viewpoint, scene.gaussians, renderArgs[0], renderArgs[1], 
+                                          cam_no=viewpoint.cam_no, iter=iteration,
+                                          num_down_emb_c=min_embeddings, 
+                                          num_down_emb_f=min_embeddings)
+                    image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                    
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+                    
+                    try:
+                        if tb_writer and (idx < 5):
+                            tb_writer.add_images(stage + "/"+config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
+                            if iteration == testing_iterations[0]:
+                                tb_writer.add_images(stage + "/"+config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                    except:
+                        pass
+                    l1_test += l1_loss(image, gt_image).mean().double()
+                    psnr_test += psnr(image, gt_image).mean().double()
+                    
+                psnr_test /= len(config['cameras'])
+                l1_test /= len(config['cameras'])          
+                print("\n[ITER {}] Evaluating {}: L1 {} PSNR {}".format(iteration, config['name'], l1_test, psnr_test))
+                
+                if tb_writer:
+                    tb_writer.add_scalar(stage + "/"+config['name'] + '/loss_viewpoint - l1_loss', l1_test, iteration)
+                    tb_writer.add_scalar(stage+"/"+config['name'] + '/loss_viewpoint - psnr', psnr_test, iteration)
+
+        if tb_writer:
+            tb_writer.add_histogram(f"{stage}/scene/opacity_histogram", scene.gaussians.get_opacity, iteration)
+            tb_writer.add_scalar(f'{stage}/total_points', scene.gaussians.get_xyz.shape[0], iteration)
+            if hasattr(scene.gaussians, '_deformation_table'):
+                tb_writer.add_scalar(f'{stage}/deformation_rate', scene.gaussians._deformation_table.sum()/scene.gaussians.get_xyz.shape[0], iteration)
+            if hasattr(scene.gaussians, '_deformation_accum'):
+                tb_writer.add_histogram(f"{stage}/scene/motion_histogram", scene.gaussians._deformation_accum.mean(dim=-1)/100, iteration, max_bins=500)
+        
+        torch.cuda.empty_cache()
+        
         
 def setup_seed(seed):
      torch.manual_seed(seed)

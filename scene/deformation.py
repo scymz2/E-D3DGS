@@ -90,7 +90,7 @@ class deform_network(nn.Module):
     
     def query_time(self, pts, scales, rotations, time_emb, pc=None, embeddings=None, sh_coef=None, iter=None, feature_out=None, use_coarse_temporal_embedding=False, num_down_emb=30):
         # 第1步：提取时间信息
-        t = time_emb[:,:1]
+        t = time_emb[:,:1] # 获取所有批次的第一个时间戳，假设时间嵌入是一个形状为[N, 1]的张量， 所以t是一个形状为[N, 1]的张量
 
         # 第2步：根据不同策略获取时间嵌入
         if use_coarse_temporal_embedding:
@@ -108,7 +108,7 @@ class deform_network(nn.Module):
         # 第3步：拼接时间嵌入和高斯嵌入
         if type(pc) == type(None):
             h = torch.cat([h, embeddings], dim=-1) # 直接使用传入的embeddings
-        else:        
+        else:
             h = torch.cat([h, pc.get_embedding], dim=-1) # 从点云对象获取embedding
 
         # 第4步：通过特征网络处理
@@ -137,14 +137,15 @@ class deform_network(nn.Module):
         pts, scales, rotations, opacity = point[:, :3], scales[:,:3], rotations[:,:4], opacity[:,:1]
         pts_orig, scales_orig, rotations_orig, opacity_orig, sh_coefs_orig = pts, scales, rotations, opacity, sh_coefs
         
+        # 如果不存在cam_no, 则说明只有一个相机，不需要考虑不同相机间同步存在的时间偏移误差
         if type(cam_no) == type(None):
-            offset = torch.masked_select(self.offsets, self.offsets.ne(0)).mean()
-            offset[torch.isnan(offset)] = 0
+            offset = torch.masked_select(self.offsets, self.offsets.ne(0)).mean() # 计算非零偏移的平均值， 如果没有非零偏移，则返回0
+            offset[torch.isnan(offset)] = 0  # 避免nan值，替换为0
         else:
             offset = self.offsets[cam_no]
         time_emb += offset
 
-        # 退火稀疏计算
+        # 退火系数计算
         use_anneal = self.args.use_anneal
         coef = 1 if not use_anneal else np.clip(iter/1000,0,1)  # 主变形系数
         coef_c = 1 if not use_anneal else np.clip((iter-self.args.deform_from_iter)/1000,0,1)
@@ -152,6 +153,7 @@ class deform_network(nn.Module):
         coef_s = 1 if not use_anneal else np.clip((iter-self.args.deform_from_iter)/1000,0,1)
 
         if self.args.no_coarse_deform:
+            # 如果不使用粗粒度变形，则直接使用原始点云数据
             pts_sub, scales_sub, rotations_sub, opacity_sub, sh_coefs_sub = pts_orig, scales_orig, rotations_orig, opacity_orig, sh_coefs_orig
         else:
             hidden = self.query_time(pts, scales, rotations, time_emb, pc, embeddings, sh_coefs, iter, self.feature_out_c, self.args.use_coarse_temporal_embedding, num_down_emb=num_down_emb_c).float()        
@@ -159,12 +161,13 @@ class deform_network(nn.Module):
                 self.pos_deform_c, self.scales_deform_c, self.rotations_deform_c, self.opacity_deform_c, self.rgb_deform_c, coef, coef_c, coef_o, coef_s)
 
         if self.args.no_fine_deform:
+            # 如果不使用细粒度变形，则直接使用粗粒度变形后的点云数据
             pts, scales, rotations, opacity, sh_coefs = pts_sub, scales_sub, rotations_sub, opacity_sub, sh_coefs_sub
         else:
             hidden = self.query_time(pts_sub, scales_sub, rotations_sub, time_emb, pc, embeddings, sh_coefs_sub, iter, self.feature_out_f, num_down_emb=num_down_emb_f).float()
             pts, scales, rotations, opacity, sh_coefs = self.deform(hidden, pts_sub, scales_sub, rotations_sub, opacity_sub, sh_coefs_sub,\
                 self.pos_deform_f, self.scales_deform_f, self.rotations_deform_f, self.opacity_deform_f, self.rgb_deform_f, coef, coef_c, coef_o, coef_s)
-                        
+        # 返回三种变形后的点云数据：原始的点云数据和经过粗粒度、细粒度变形后的点云数据
         return pts, scales, rotations, opacity, sh_coefs, \
             ((pts_sub, scales_sub, rotations_sub, opacity_sub, sh_coefs_sub), \
             (pts_orig, scales_orig, rotations_orig, opacity_orig, sh_coefs_orig))
