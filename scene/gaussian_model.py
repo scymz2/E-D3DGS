@@ -50,11 +50,10 @@ class GaussianModel:
         self.max_sh_degree = sh_degree
 
         self._xyz = torch.empty(0)
-        # self._deformation = deform_network(W=args.net_width, D=args.defor_depth, 
-        #                                    min_embeddings=args.min_embeddings, max_embeddings=args.max_embeddings, 
-        #                                    num_frames=args.total_num_frames,
-        #                                    args=args)
-        self._deformation = deform_network(W=args.net_width, D=args.defor_depth, args=args)
+        self._deformation = deform_network(W=args.net_width, D=args.defor_depth, 
+                                           min_embeddings=args.min_embeddings, max_embeddings=args.max_embeddings, 
+                                           num_frames=args.total_num_frames,
+                                           args=args)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
