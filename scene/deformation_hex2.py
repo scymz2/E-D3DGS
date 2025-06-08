@@ -29,7 +29,7 @@ def fourier_encode(x: torch.Tensor, freq_buf: torch.Tensor) -> torch.Tensor:
     return torch.cat([x, emb.sin(), emb.cos()], dim=-1)
 
 class deform_network(nn.Module):
-    def __init__(self, D=8, W=256, max_embeddings=150, num_frames=300, num_cam=None, args=None) -> None:
+    def __init__(self, D=8, W=256, min_embeddings=30, max_embeddings=150, num_frames=300, num_cam=None, args=None) -> None:
         super().__init__()
         self.grid = HexPlaneField(1.6, {
         'grid_dimensions': 2,
