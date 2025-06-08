@@ -40,6 +40,37 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 
+def get_annealing_factor(iteration, max_iter, strategy='linear', start=0.1, end=1.0, warmup_iter=1000):
+    """计算退火系数
+    
+    Args:
+        iteration: 当前迭代次数
+        max_iter: 最大迭代次数
+        strategy: 退火策略，可选 'linear', 'exp', 'cosine'
+        start: 起始系数（训练初期，应该较小）
+        end: 结束系数（训练后期，应该较大）
+        warmup_iter: 预热迭代次数，在此之前保持起始系数
+        
+    Returns:
+        退火系数，范围在 [start, end] 之间，从小到大
+    """
+    if iteration < warmup_iter:
+        return start
+    
+    # 归一化当前迭代位置到 [0, 1] 范围
+    progress = min(1.0, (iteration - warmup_iter) / (max_iter - warmup_iter))
+    
+    if strategy == 'linear':
+        factor = start + (end - start) * progress  # 从 start 线性增长到 end
+    elif strategy == 'exp':
+        factor = start * (end / start) ** progress  # 从 start 指数增长到 end
+    elif strategy == 'cosine':
+        factor = start + 0.5 * (end - start) * (1 - np.cos(np.pi * progress))  # 从 start 余弦增长到 end
+    else:
+        factor = start  # 默认保持起始值
+        
+    return factor
+
 def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations, 
                          checkpoint_iterations, checkpoint, debug_from,
                          gaussians, scene, tb_writer, train_iter,timer, start_time):
@@ -228,7 +259,33 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
         # use l1 instead of opacity reset
         if opt.opacity_l1_coef_fine > 0.:
             loss += opt.opacity_l1_coef_fine * torch.sigmoid(gaussians._opacity.mean())
+            
 
+        # loss from 4D Gaussians------------------------------------------------------------------------------------------------
+        # 计算退火系数
+        annealing_factor = get_annealing_factor(
+            iteration, 
+            opt.iterations,
+            strategy=getattr(opt, 'reg_annealing', 'linear'),
+            start=getattr(opt, 'reg_start_factor', 0.1),
+            end=getattr(opt, 'reg_end_factor', 1.0),
+            warmup_iter=getattr(opt, 'reg_warmup_iter', 1000)
+        )
+        
+        # 使用退火系数调整正则化权重
+        hyper.time_smoothness_weight = 0.001 * annealing_factor
+        hyper.l1_time_planes = 0.0001 * annealing_factor
+        hyper.plane_tv_weight = 0.0002 * annealing_factor
+        
+        tv_loss = gaussians.compute_regulation(hyper.time_smoothness_weight, hyper.l1_time_planes, hyper.plane_tv_weight)
+        loss += tv_loss
+        
+        # 记录到TensorBoard中，方便监控
+        if tb_writer and iteration % 100 == 0:
+            tb_writer.add_scalar('regularization/annealing_factor', annealing_factor, iteration)
+            tb_writer.add_scalar('regularization/time_smoothness_weight', hyper.time_smoothness_weight, iteration)
+            tb_writer.add_scalar('regularization/tv_loss', tv_loss.item(), iteration)
+        
         # embedding reg using knn (https://github.com/JonathonLuiten/Dynamic3DGaussians)
         if prev_num_pts != gaussians._xyz.shape[0]:
             neighbor_sq_dist, neighbor_indices = o3d_knn(gaussians._xyz.detach().cpu().numpy(), 20)

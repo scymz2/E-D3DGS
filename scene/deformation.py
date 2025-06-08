@@ -12,6 +12,17 @@ from torch.utils.cpp_extension import load
 import torch.nn.init as init
 
 
+def kaiming_init_weights(m):
+        """
+        Applies He Kaiming normal initialization to linear layers.
+        """
+        if isinstance(m, nn.Linear):
+            # Use Kaiming Normal initialization, best for ReLU activations
+            nn.init.kaiming_normal_(m.weight, a=0, mode='fan_in', nonlinearity='relu')
+            if m.bias is not None:
+                # Initialize bias to zero
+                nn.init.zeros_(m.bias)
+
 class deform_network(nn.Module):
     def __init__(self, D=8, W=256, min_embeddings=30, max_embeddings=150, num_frames=300, num_cam=None, args=None,):
         super(deform_network, self).__init__()
@@ -31,7 +42,7 @@ class deform_network(nn.Module):
         # 粗粒度网络（coarse）
         self.feature_out_c, self.pos_deform_c, self.scales_deform_c, self.rotations_deform_c, self.opacity_deform_c, self.rgb_deform_c = self.create_net()
         # 细粒度网络（fine）
-        self.feature_out_f, self.pos_deform_f, self.scales_deform_f, self.rotations_deform_f, self.opacity_deform_f, self.rgb_deform_f = self.create_net()
+        self.feature_out_f, self.pos_deform_f, self.scales_deform_f, self.rotations_deform_f, self.opacity_deform_f, self.rgb_deform_f = self.create_net(is_residual=True)
 
         if args.zero_temporal: # 时间嵌入
             # 零初始化的时间嵌入
@@ -41,7 +52,7 @@ class deform_network(nn.Module):
             self.weight = torch.nn.Parameter(torch.normal(0., 0.01/np.sqrt(self.temporal_embedding_dim),size=(max_embeddings, self.temporal_embedding_dim)))
         self.offsets = torch.nn.Parameter(torch.zeros((30, 1)))  # hard coded the upper limit of the num cameras (adjust as necessary)
 
-    def create_net(self):
+    def create_net(self, is_residual=False):
         # 初始化一个包含单个线性层的列表，这个线性层的作用是将时间嵌入和高斯嵌入的维度组合并映射到W维度
         self.feature_out = [nn.Linear(self.temporal_embedding_dim + self.gaussian_embedding_dim, self.W)]
         
@@ -49,13 +60,23 @@ class deform_network(nn.Module):
             self.feature_out.append(nn.ReLU())
             self.feature_out.append(nn.Linear(self.W,self.W))
         feature_out = nn.Sequential(*self.feature_out) # 列表转为顺序容器, Sequential可以将多个层组合成一个层，层中自动执行forward
-        return  \
-            feature_out,\
-            nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3)),\
-            nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3)),\
-            nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 4)), \
-            nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1)), \
-            nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3*16)),\
+        
+        if is_residual:
+            return \
+                feature_out.apply(kaiming_init_weights),\
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3)).apply(kaiming_init_weights),\
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3)).apply(kaiming_init_weights),\
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 4)).apply(kaiming_init_weights), \
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1)).apply(kaiming_init_weights), \
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3*16)).apply(kaiming_init_weights)
+        else:
+            return  \
+                feature_out,\
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3)),\
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3)),\
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 4)), \
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 1)), \
+                nn.Sequential(nn.ReLU(),nn.Linear(self.W,self.W),nn.ReLU(),nn.Linear(self.W, 3*16)),\
 
     def get_temporal_embed(self, t, current_num_embeddings, align_corners=True):
         # 动态调整时间嵌入表大小

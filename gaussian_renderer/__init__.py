@@ -4,6 +4,8 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from time import time as get_time
+# from torch.profiler import profile, record_function, ProfilerActivity
+
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, cam_no=None, iter=None, train_coarse=False, \
     num_down_emb_c=5, num_down_emb_f=5, gui=False):
     """
@@ -68,8 +70,29 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         scales = pc._scaling
         rotations = pc._rotation
 
+
     means3D_final, scales_final, rotations_final, opacity_final, shs_final, extras = pc._deformation(means3D, scales, 
         rotations, opacity, time, cam_no, pc, None, shs, iter=iter, num_down_emb_c=num_down_emb_c, num_down_emb_f=num_down_emb_f)
+    
+
+    # with profile(
+    #     activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+    #     record_shapes=True,
+    #     profile_memory=True,
+    #     with_stack=True
+    # ) as prof:
+    #     with record_function("model_inference"):
+    #         means3D_final, scales_final, rotations_final, opacity_final, shs_final, extras = pc._deformation(means3D, scales, 
+    #             rotations, opacity, time, cam_no, pc, None, shs, iter=iter, num_down_emb_c=num_down_emb_c, num_down_emb_f=num_down_emb_f)
+    
+    # print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=20))
+    # print("\nGPU时间分析:")
+    # print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=20))
+    # print("\n内存使用分析:")
+    # print(prof.key_averages().table(sort_by="self_cuda_memory_usage", row_limit=10))
+    
+    
+    # prof.export_chrome_trace("deformation_hex_trace.json")
 
     scales_final = pc.scaling_activation(scales_final)
     rotations_final = pc.rotation_activation(rotations_final)

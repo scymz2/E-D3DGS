@@ -21,7 +21,8 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
-from scene.deformation import deform_network
+# from scene.deformation_hex import deform_network
+from scene.deformation_hex2 import DeformNetwork as deform_network
 
 
 class GaussianModel:
@@ -49,10 +50,11 @@ class GaussianModel:
         self.max_sh_degree = sh_degree
 
         self._xyz = torch.empty(0)
-        self._deformation = deform_network(W=args.net_width, D=args.defor_depth, 
-                                           min_embeddings=args.min_embeddings, max_embeddings=args.max_embeddings, 
-                                           num_frames=args.total_num_frames,
-                                           args=args)
+        # self._deformation = deform_network(W=args.net_width, D=args.defor_depth, 
+        #                                    min_embeddings=args.min_embeddings, max_embeddings=args.max_embeddings, 
+        #                                    num_frames=args.total_num_frames,
+        #                                    args=args)
+        self._deformation = deform_network(W=args.net_width, D=args.defor_depth, args=args)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
         self._scaling = torch.empty(0)
@@ -494,3 +496,67 @@ class GaussianModel:
                     if weight.grad.mean() != 0:
                         print(name," :",weight.grad.mean(), weight.grad.min(), weight.grad.max())
         print("-"*50)
+
+    # 4DGaussians
+    
+    def _plane_regulation(self):
+        """
+        函数计算一个正则化项，用于约束高斯模型形变场中的空间平面（spatial planes）的光滑性。它遍历形变网络（deformation network）的多个分辨率的网格（grids），并对每个网格中的空间平面计算 compute_plane_smoothness，然后将结果累加起来。这个正则化项可以帮助模型学习更平滑的形变场，从而提高渲染质量。
+        """
+        multi_res_grids = self._deformation.grid.grids
+        total = 0
+        # model.grids is 6 x [1, rank * F_dim, reso, reso]
+        for grids in multi_res_grids:
+            if len(grids) == 3: # 判断是否为3D网格，如果不是就不进行任何操作
+                time_grids = []
+            else:
+                time_grids =  [0,1,3] # [xy, xz, yz]
+            for grid_id in time_grids:
+                total += compute_plane_smoothness(grids[grid_id])
+        return total
+    def _time_regulation(self):
+        multi_res_grids = self._deformation.grid.grids
+        total = 0
+        # model.grids is 6 x [1, rank * F_dim, reso, reso]
+        for grids in multi_res_grids:
+            if len(grids) == 3:
+                time_grids = []
+            else:
+                time_grids =[2, 4, 5] # [xt, yt, zt]
+            for grid_id in time_grids:
+                total += compute_plane_smoothness(grids[grid_id])
+        return total
+    def _l1_regulation(self):
+                # model.grids is 6 x [1, rank * F_dim, reso, reso]
+        multi_res_grids = self._deformation.grid.grids
+
+        total = 0.0
+        for grids in multi_res_grids:
+            if len(grids) == 3:
+                continue
+            else:
+                # These are the spatiotemporal grids
+                spatiotemporal_grids = [2, 4, 5]
+            for grid_id in spatiotemporal_grids:
+                total += torch.abs(1 - grids[grid_id]).mean()
+        return total
+    def compute_regulation(self, time_smoothness_weight, l1_time_planes_weight, plane_tv_weight):
+        """
+        该函数旨在通过对形变场施加约束，来避免过拟合，并鼓励模型学习更平滑、更稳定的形变。这对于动态场景的建模尤其重要，因为形变场需要能够准确地表示场景随时间的变化。
+        此函数暴扣三个正则化项： 1.空间平面正则化 2.时间平面正则化 3. l1时间平面正则化
+        """
+        return plane_tv_weight * self._plane_regulation() + time_smoothness_weight * self._time_regulation() + l1_time_planes_weight * self._l1_regulation()
+    
+def compute_plane_smoothness(t):
+        batch_size, c, h, w = t.shape
+        # Convolve with a second derivative filter, in the time dimension which is dimension 2
+        # 一阶差分表示的是数据变化的速度，二阶差分表示的是数据变化的加速度
+        # 一阶导和二阶导的差别
+        first_difference = t[..., 1:, :] - t[..., :h-1, :]  # [batch, c, h-1, w]
+        second_difference = first_difference[..., 1:, :] - first_difference[..., :h-2, :]  # [batch, c, h-2, w]
+        # Take the L2 norm of the result
+        return torch.square(second_difference).mean()
+
+    
+
+    
