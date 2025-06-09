@@ -192,7 +192,7 @@ class deform_network(nn.Module):
     #     emb = emb.repeat(1,1,N,1).squeeze()
     #     return emb
     
-    def _temb_linear_optimized(self, t: torch.Tensor, n_T: int) -> torch.Tensor:
+    def _temb_linear(self, t: torch.Tensor, n_T: int) -> torch.Tensor:
         """
         优化的temporal embedding获取:
         1. 预计算不同分辨率下的嵌入表
