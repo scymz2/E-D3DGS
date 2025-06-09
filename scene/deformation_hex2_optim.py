@@ -178,55 +178,59 @@ class deform_network(nn.Module):
     #     return self.weight[idx0] * (1 - w) + self.weight[idx1] * w
     
     # 这个1个小时40分钟左右
-    # def _temb_linear(self, t, current_num_embeddings, align_corners=True):
-    #     emb_resized = F.interpolate(self.weight[None,None,...], 
-    #                             size=(current_num_embeddings, self.temporal_embedding_dim), 
-    #                             mode='bilinear', align_corners=True)
-    #     N, _ = t.shape
-    #     t = t[0,0]
-    #     fdim = self.temporal_embedding_dim
-    #     grid = torch.cat([torch.arange(fdim).cuda().unsqueeze(-1)/(fdim-1), torch.ones(fdim,1).cuda() * t, ], dim=-1)[None,None,...]
-    #     grid = (grid - 0.5) * 2
-    #     emb = F.grid_sample(emb_resized, grid, align_corners=align_corners, mode='bilinear', padding_mode='reflection')
+    def _temb_linear(self, t, current_num_embeddings, align_corners=True):
+        emb_resized = F.interpolate(self.weight[None,None,...], 
+                                size=(current_num_embeddings, self.temporal_embedding_dim), 
+                                mode='bilinear', align_corners=True)
+        N, _ = t.shape
+        t = t[0,0]
+        fdim = self.temporal_embedding_dim
+        grid = torch.cat([torch.arange(fdim).cuda().unsqueeze(-1)/(fdim-1), torch.ones(fdim,1).cuda() * t, ], dim=-1)[None,None,...]
+        grid = (grid - 0.5) * 2
+        emb = F.grid_sample(emb_resized, grid, align_corners=align_corners, mode='bilinear', padding_mode='reflection')
         
-    #     emb = emb.repeat(1,1,N,1).squeeze()
-    #     return emb
+        emb = emb.repeat(1,1,N,1).squeeze()
+        return emb
     
-    def _temb_linear(self, t: torch.Tensor, n_T: int) -> torch.Tensor:
-        """
-        优化的temporal embedding获取:
-        1. 预计算不同分辨率下的嵌入表
-        2. 使用直接索引替代插值
-        3. 减少内存拷贝
-        """
-        # 缓存预计算的结果
-        if not hasattr(self, '_emb_cache'):
-            self._emb_cache = {}
+    # 这个也是巨慢无比
+    # def _temb_linear(self, t: torch.Tensor, n_T: int) -> torch.Tensor:
+    #     """
+    #     优化的temporal embedding获取:
+    #     1. 预计算不同分辨率下的嵌入表
+    #     2. 使用直接索引替代插值
+    #     3. 减少内存拷贝
+    #     """
+    #     if t.dim() > 1:
+    #          t = t.squeeze(-1)  # (N, 1) -> (N,)
+
+    #     # 缓存预计算的结果
+    #     if not hasattr(self, '_emb_cache'):
+    #         self._emb_cache = {}
         
-        # 为当前分辨率创建/获取缓存
-        key = f'emb_{n_T}'
-        if key not in self._emb_cache:
-            emb_resized = F.interpolate(
-                self.weight[None, None, ...],
-                size=(n_T, self.temporal_embedding_dim),
-                mode='bilinear', align_corners=True
-            ).squeeze(0).squeeze(0)  # (1, 1, n_T, D) -> (n_T, D)
-            self._emb_cache[key] = emb_resized
+    #     # 为当前分辨率创建/获取缓存
+    #     key = f'emb_{n_T}'
+    #     if key not in self._emb_cache:
+    #         emb_resized = F.interpolate(
+    #             self.weight[None, None, ...],
+    #             size=(n_T, self.temporal_embedding_dim),
+    #             mode='bilinear', align_corners=True
+    #         ).squeeze(0).squeeze(0)  # (1, 1, n_T, D) -> (n_T, D)
+    #         self._emb_cache[key] = emb_resized
         
-        # 获取预计算的分辨率
-        emb_table = self._emb_cache[key]
+    #     # 获取预计算的分辨率
+    #     emb_table = self._emb_cache[key]
         
-        # 直接索引替代grid_sample
-        indices = t.clamp(0, 1) * (n_T - 1)  # 标准化到[0, n_T-1]范围
-        idx0 = indices.floor().long().clamp(0, n_T-1)
-        idx1 = idx0 + 1
-        idx1 = idx1.clamp(max=n_T-1)
+    #     # 直接索引替代grid_sample
+    #     indices = t.clamp(0, 1) * (n_T - 1)  # 标准化到[0, n_T-1]范围
+    #     idx0 = indices.floor().long().clamp(0, n_T-1)
+    #     idx1 = idx0 + 1
+    #     idx1 = idx1.clamp(max=n_T-1)
         
-        # 插值权重
-        w = (indices - idx0).unsqueeze(-1)
+    #     # 插值权重
+    #     w = (indices - idx0).unsqueeze(-1)
         
-        # 线性插值
-        return (1 - w) * emb_table[idx0] + w * emb_table[idx1]
+    #     # 线性插值
+    #     return (1 - w) * emb_table[idx0] + w * emb_table[idx1]
     
     def int_lininterp(self, t, init_val, final_val, until):
         return int(init_val + (final_val - init_val) * min(max(t, 0), until) / until)
