@@ -46,6 +46,8 @@ class deform_network(nn.Module):
         self.register_buffer("rot_scale_freq", 2 ** torch.arange(2))
 
         # ======================== 时序嵌入  ========================
+        self.max_embeddings = max_embeddings
+        self.min_embeddings = min_embeddings
         self.temporal_embedding_dim = args.temporal_embedding_dim
         self.gaussian_embedding_dim = args.gaussian_embedding_dim
         self.c2f_temporal_iter = args.c2f_temporal_iter # 渐进式训练参数
@@ -128,6 +130,9 @@ class deform_network(nn.Module):
         emb = emb.repeat(1,1,N,1).squeeze()
         return emb
     
+    def int_lininterp(self, t, init_val, final_val, until):
+        return int(init_val + (final_val - init_val) * min(max(t, 0), until) / until)
+    
     
 
     # ---------------------------- forward ------------------------------
@@ -147,64 +152,59 @@ class deform_network(nn.Module):
         num_down_emb_f=30              # 细网络降采样嵌入数
     ):
         # 确保输入是float32类型
-        pts = pts[:, :3].float()
-        scales = scales[:, :3].float()
-        rotations = rotations[:, :4].float()
-        opacity = opacity[:, :1].float()
+        pts = pts.float()
+        scales = scales.float()
+        rotations = rotations.float()
+        opacity = opacity.float()
         time = time.float()
         
         # --------------------------- 预处理 ----------------------------
         # 先保存一份「原始输入」备份
-        pts0, scl0, rot0, opa0 = pts, scales, rotations, opacity
-        sh0 = sh_coefs if sh_coefs is None else sh_coefs
-
+        pts, scales, rotations, opacity = pts[:, :3], scales[:, :3], rotations[:, :4], opacity[:, :1]
+        pts0, scl0, rot0, opa0, sh0 = pts, scales, rotations, opacity, sh_coefs
         # fourier 编码
         pts_fourier = fourier_encode(pts, self.pos_freq)  # (N, 3 + 2*10)
         scales_fourier = fourier_encode(scales, self.pos_freq)  # (N, 3 + 2*10)
         rotations_fourier = fourier_encode(rotations, self.rot_scale_freq)  # (N, 4 + 2*2)
 
-        # 相机时间偏移（若有）
-        if cam_no is not None:
-            time = time + self.offsets[cam_no]
-        else:
-            # 使用 offsets 中非零值的均值（若存在），否则不偏移
-            non_zero = self.offsets != 0
-            if non_zero.any():
-                time = time + self.offsets[non_zero].mean()
+        # # 相机时间偏移（若有）
+        # if cam_no is not None:
+        #     time = time + self.offsets[cam_no]
+        # else:
+        #     # 使用 offsets 中非零值的均值（若存在），否则不偏移
+        #     non_zero = self.offsets != 0
+        #     if non_zero.any():
+        #         time = time + self.offsets[non_zero].mean()
 
         # --------------------------- 退火系数 ---------------------------
-        use_anneal = getattr(self.args, "use_anneal", False)
-        if not use_anneal:
-            coef_main = coef_c = coef_o = coef_s = 1.0
-        else:
-            # 1 000 step 线性生效，可根据需要改成 args 中的常量
-            coef_main = min(iter / 1_000, 1.0)
-            start = getattr(self.args, "deform_from_iter", 0)
-            k = max(iter - start, 0)
-            coef_c = coef_o = coef_s = min(k / 1_000, 1.0)
+        use_anneal = self.args.use_anneal
+        coef_main = 1 if not use_anneal else np.clip(iter/1000,0,1)  # 主变形系数
+        coef_c = 1 if not use_anneal else np.clip((iter-self.args.deform_from_iter)/1000,0,1)
+        coef_o = 1 if not use_anneal else np.clip((iter-self.args.deform_from_iter)/1000,0,1)
+        coef_s = 1 if not use_anneal else np.clip((iter-self.args.deform_from_iter)/1000,0,1)
 
         #自动混精度
         use_amp = getattr(self.args, "use_amp", True)
         with torch.cuda.amp.autocast(enabled=use_amp):
-            grid_feat = self.grid(pts, time)  # (N, feat_dim)
+            grid_feat = self.grid(pts, time).float()  # (N, feat_dim)
             hidden_c = self.mlp_c(grid_feat)      # (N, W)
 
             # ------------------ coarse deform -----------------------------
             # ---- 位置 ----
             dx  = self.pos_head_c(hidden_c)
-            pts_c = pts + dx * coef_main
+            pts_c = pts + dx
 
             # ---- 尺度 ----
             ds = self.scale_head_c(hidden_c) if not getattr(self.args, "no_ds", False) else 0.0
-            scl_c = scales + ds * coef_main * coef_s
+            scl_c = scales + ds
 
             # ---- 旋转 ----
             dr = self.rot_head_c(hidden_c) if not getattr(self.args, "no_dr", False) else 0.0
-            rot_c = rotations + dr * coef_main
+            rot_c = rotations + dr
 
             # ---- 透明度 ----
             do = self.opa_head_c(hidden_c) if not getattr(self.args, "no_do", False) else 0.0
-            opa_c = opacity + do * coef_main * coef_o
+            opa_c = opacity + do
 
             # ---- SH/RGB ----
             dc = (
@@ -212,21 +212,18 @@ class deform_network(nn.Module):
                 if not getattr(self.args, "no_dc", False)
                 else 0.0
             )
-            sh_c = sh0 + dc * coef_main * coef_c
+            sh_c = sh0 + dc
 
             # ------------------ temporal embed (fine) ----------------------
-            if getattr(self.args, "no_c2f_temporal", False):
-                nT = self.args.max_embeddings
+            if self.args.use_coarse_temporal_embedding:
+                t_emb = self._temb_linear(time, num_down_emb_f)  # (N, temporal_embedding_dim)
             else:
-                # 渐进式
-                nT = int(
-                    self.args.min_embeddings
-                    + (self.args.max_embeddings - self.args.min_embeddings)
-                    * min(iter, self.c2f_temporal_iter)
-                    / self.c2f_temporal_iter
-                )
-            t_emb = self._temb_linear(time, nT)                  # (N,tself.temporal_embedding_dim)
+                if self.args.no_c2f_temporal_embedding:
+                    t_emb = self._temb_linear(time, self.max_embeddings)  # (N, temporal_embedding_dim)
+                else:
+                    t_emb = self._temb_linear(time, self.int_lininterp(iter, num_down_emb_f, self.max_embeddings, self.c2f_temporal_iter))
 
+            
             if gaussian_emb is None:
                 gaussian_emb = pc.get_embedding
 
