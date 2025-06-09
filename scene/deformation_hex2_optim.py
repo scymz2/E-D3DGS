@@ -80,9 +80,27 @@ class deform_network(nn.Module):
             self.weight = torch.nn.Parameter(torch.normal(0., 0.01/np.sqrt(self.temporal_embedding_dim),size=(max_embeddings, self.temporal_embedding_dim)))
         self.offsets = torch.nn.Parameter(torch.zeros((30, 1)))  # hard coded the upper limit of the num cameras (adjust as necessary)
 
+        # class EfficientMultiHead(nn.Module):
+        #     def __init__(self, in_dim, hidden, out_dims, depth=2):  # 头部使用固定2层深度
+        #         super().__init__()
+        #         self.shared = nn.Sequential(
+        #             nn.Linear(in_dim, hidden),
+        #             nn.ReLU(),
+        #             nn.Linear(hidden, hidden),  # 仅2层共享特征提取
+        #             nn.ReLU(),
+        #         )
+        #         self.heads = nn.ModuleList([
+        #             nn.Linear(hidden, d) for d in out_dims
+        #         ])
+                
+        #     def forward(self, x):
+        #         x = self.shared(x)
+        #         return [head(x) for head in self.heads]
+    
         class MultiHeadPredictor(nn.Module):
             def __init__(self, in_dim, hidden, depth, out_dim, residual=False):
                 super().__init__()
+                self.out_dim = out_dim
                 total_dim = sum(out_dim)
                 layers = [nn.Linear(in_dim, hidden)]
                 for _ in range(depth - 1):
@@ -98,7 +116,7 @@ class deform_network(nn.Module):
             def forward(self, x):
                 x = self.shared(x)
                 x = self.head(x)
-                return torch.split(x, self.out_dims, dim=-1)
+                return torch.split(x, self.out_dim, dim=-1)
             
         self.coarse_predictor = MultiHeadPredictor(self.grid.feat_dim, W, D, [3, 3, 4, 1, 16 * 3])
         self.fine_predictor = MultiHeadPredictor(args.temporal_embedding_dim + args.gaussian_embedding_dim, W, D, [3, 3, 4, 1, 16 * 3])
@@ -147,17 +165,19 @@ class deform_network(nn.Module):
     #     return head
     
     # ---------------------- Temporal embedding ------------------------
-    def _temb_linear(self, t_norm: torch.Tensor, n_T: int) -> torch.Tensor:
-        # 确保 t_norm 是 (N,) 而不是 (N, 1)
-        if t_norm.dim() > 1:
-            t_norm = t_norm.squeeze(-1)  # (N, 1) -> (N,)
+    # 这个巨慢无比
+    # def _temb_linear(self, t_norm: torch.Tensor, n_T: int) -> torch.Tensor:
+    #     # 确保 t_norm 是 (N,) 而不是 (N, 1)
+    #     if t_norm.dim() > 1:
+    #         t_norm = t_norm.squeeze(-1)  # (N, 1) -> (N,)
         
-        idx_f = t_norm.clamp(0, 1) * (n_T - 1)
-        idx0 = torch.floor(idx_f).long()
-        idx1 = (idx0 + 1).clamp(max=n_T - 1)
-        w = (idx_f - idx0.float()).unsqueeze(-1)
-        return self.weight[idx0] * (1 - w) + self.weight[idx1] * w
+    #     idx_f = t_norm.clamp(0, 1) * (n_T - 1)
+    #     idx0 = torch.floor(idx_f).long()
+    #     idx1 = (idx0 + 1).clamp(max=n_T - 1)
+    #     w = (idx_f - idx0.float()).unsqueeze(-1)
+    #     return self.weight[idx0] * (1 - w) + self.weight[idx1] * w
     
+    # 这个1个小时40分钟左右
     # def _temb_linear(self, t, current_num_embeddings, align_corners=True):
     #     emb_resized = F.interpolate(self.weight[None,None,...], 
     #                             size=(current_num_embeddings, self.temporal_embedding_dim), 
@@ -172,41 +192,41 @@ class deform_network(nn.Module):
     #     emb = emb.repeat(1,1,N,1).squeeze()
     #     return emb
     
-    # def _temb_linear_optimized(self, t: torch.Tensor, n_T: int) -> torch.Tensor:
-    #     """
-    #     优化的temporal embedding获取:
-    #     1. 预计算不同分辨率下的嵌入表
-    #     2. 使用直接索引替代插值
-    #     3. 减少内存拷贝
-    #     """
-    #     # 缓存预计算的结果
-    #     if not hasattr(self, '_emb_cache'):
-    #         self._emb_cache = {}
+    def _temb_linear_optimized(self, t: torch.Tensor, n_T: int) -> torch.Tensor:
+        """
+        优化的temporal embedding获取:
+        1. 预计算不同分辨率下的嵌入表
+        2. 使用直接索引替代插值
+        3. 减少内存拷贝
+        """
+        # 缓存预计算的结果
+        if not hasattr(self, '_emb_cache'):
+            self._emb_cache = {}
         
-    #     # 为当前分辨率创建/获取缓存
-    #     key = f'emb_{n_T}'
-    #     if key not in self._emb_cache:
-    #         emb_resized = F.interpolate(
-    #             self.weight[None, None, ...],
-    #             size=(n_T, self.temporal_embedding_dim),
-    #             mode='bilinear', align_corners=True
-    #         ).squeeze(0).squeeze(0)  # (1, 1, n_T, D) -> (n_T, D)
-    #         self._emb_cache[key] = emb_resized
+        # 为当前分辨率创建/获取缓存
+        key = f'emb_{n_T}'
+        if key not in self._emb_cache:
+            emb_resized = F.interpolate(
+                self.weight[None, None, ...],
+                size=(n_T, self.temporal_embedding_dim),
+                mode='bilinear', align_corners=True
+            ).squeeze(0).squeeze(0)  # (1, 1, n_T, D) -> (n_T, D)
+            self._emb_cache[key] = emb_resized
         
-    #     # 获取预计算的分辨率
-    #     emb_table = self._emb_cache[key]
+        # 获取预计算的分辨率
+        emb_table = self._emb_cache[key]
         
-    #     # 直接索引替代grid_sample
-    #     indices = t.clamp(0, 1) * (n_T - 1)  # 标准化到[0, n_T-1]范围
-    #     idx0 = indices.floor().long().clamp(0, n_T-1)
-    #     idx1 = idx0 + 1
-    #     idx1 = idx1.clamp(max=n_T-1)
+        # 直接索引替代grid_sample
+        indices = t.clamp(0, 1) * (n_T - 1)  # 标准化到[0, n_T-1]范围
+        idx0 = indices.floor().long().clamp(0, n_T-1)
+        idx1 = idx0 + 1
+        idx1 = idx1.clamp(max=n_T-1)
         
-    #     # 插值权重
-    #     w = (indices - idx0).unsqueeze(-1)
+        # 插值权重
+        w = (indices - idx0).unsqueeze(-1)
         
-    #     # 线性插值
-    #     return (1 - w) * emb_table[idx0] + w * emb_table[idx1]
+        # 线性插值
+        return (1 - w) * emb_table[idx0] + w * emb_table[idx1]
     
     def int_lininterp(self, t, init_val, final_val, until):
         return int(init_val + (final_val - init_val) * min(max(t, 0), until) / until)

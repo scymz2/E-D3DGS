@@ -22,7 +22,7 @@ from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 # from scene.deformation_hex import deform_network
-from scene.deformation_hex2 import deform_network
+from scene.deformation_hex2_optim import deform_network
 
 
 class GaussianModel:
