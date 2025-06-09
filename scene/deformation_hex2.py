@@ -256,9 +256,9 @@ class deform_network(nn.Module):
             )
 
             # 返回三种变形后的点云数据：原始的点云数据和经过粗粒度、细粒度变形后的点云数据
-            return pts0, scl0, rot0, opa0, sh0, \
+            return pts_f, scl_f, rot_f, opa_f, sh_f, \
                 ((pts_c, scl_c, rot_c, opa_c, sh_c), \
-                    (pts_f, scl_f, rot_f, opa_f, sh_f)) \
+                    (pts0, scl0, rot0, opa0, sh0)) \
             
         
     def get_mlp_parameters(self):
